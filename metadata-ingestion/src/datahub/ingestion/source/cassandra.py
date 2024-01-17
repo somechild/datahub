@@ -82,7 +82,23 @@ from datahub.metadata.com.linkedin.pegasus2avro.schema import (
 
 logger = logging.getLogger(__name__)
 
-DENY_KEYSPACE_LIST = set(["system", "system_auth", "system_schema", "system_distributed", "system_traces"])
+
+# -------------------------------------------------- constants -------------------------------------------------- #
+PLATFORM_NAME_IN_DATAHUB = "cassandra"
+
+# we always skip over ingesting metadata about these keyspaces
+# TODO: make this configurable?
+SYSTEM_KEYSPACE_LIST = set(["system", "system_auth", "system_schema", "system_distributed", "system_traces"])
+
+# this keyspace contains details about the cassandra cluster's keyspaces, tables, and columns
+SYSTEM_SCHEMA_KESPACE_NAME = "system_schema"
+# these are the names of the tables we're interested in querying metadata from
+CASSANDRA_SYSTEM_SCHEMA_TABLES = {
+    "keyspaces": "keyspaces",
+    "tables": "tables",
+    "columns": "columns",
+}
+# these column names are present on the system_schema tables
 CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES = {
     "keyspace_name": "keyspace_name",
     "table_name": "table_name",
@@ -90,6 +106,17 @@ CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES = {
     "column_type": "type",
 }
 
+# -------------------------------------------------- queries -------------------------------------------------- #
+# get all keyspaces
+GET_KEYSPACES_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SYSTEM_SCHEMA_TABLES['keyspaces']}"
+# get all tables for a keyspace
+GET_TABLES_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SYSTEM_SCHEMA_TABLES['tables']} WHERE {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['keyspace_name']} = %s"
+# get all columns for a table
+GET_COLUMNS_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SYSTEM_SCHEMA_TABLES['columns']} WHERE {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['keyspace_name']} = %s AND {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['table_name']} = %s"
+
+# -------------------------------------------------- setup the config and source reporter -------------------------------------------------- #
+
+# config
 class CassandraSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
     contact_point: str = Field(
         default="localhost", description="The cassandra instance contact point domain (without the port)."
@@ -104,10 +131,11 @@ class CassandraSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
         default=None, description="The password credential."
     )
     excludeKeyspaces: List[str] = Field(
-        default=list, description="The keyspaces to exclude."
+        default=[], description="The keyspaces to exclude."
     )
 
 
+# source reporter
 @dataclass
 class CassandraSourceReport(SourceReport):
     filtered: List[str] = field(default_factory=list)
@@ -117,6 +145,7 @@ class CassandraSourceReport(SourceReport):
 
 
 
+# -------------------------------------------------- the main source class -------------------------------------------------- #
 @platform_name("Cassandra")
 @config_class(CassandraSourceConfig)
 @support_status(SupportStatus.TESTING)
@@ -148,7 +177,6 @@ class CassandraSource(Source):
         cluster = Cluster([config.contact_point], port = config.port, auth_provider=auth_provider,ssl_context=ssl_context)
         session = cluster.connect()
         self.cassandra_session = session
-        
 
     @classmethod
     def create(cls, config_dict, ctx):
@@ -158,98 +186,117 @@ class CassandraSource(Source):
     def get_workunits_internal(
             self,
     ) -> Iterable[MetadataWorkUnit]:
-        platform_name = "cassandra"
 
-        # iterate through all keyspaces
-        keyspaces = self.cassandra_session.execute("SELECT * FROM system_schema.keyspaces")
+        # get all keyspaces and iterate through them
+        keyspaces = self.cassandra_session.execute(GET_KEYSPACES_QUERY)
         keyspaces = sorted(keyspaces, key=lambda k: getattr(k, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["keyspace_name"]))
+
         for keyspace in keyspaces:
-            # skip system keyspaces
             keyspace_name = getattr(keyspace, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["keyspace_name"])
-            if keyspace_name in DENY_KEYSPACE_LIST:
+            
+            # skip system keyspaces
+            if keyspace_name in SYSTEM_KEYSPACE_LIST:
                 continue
-            # skip excluded keyspaces
-            if keyspace_name in self.config.excludeKeyspaces:
+            # skip keyspaces excluded by the config
+            if self.config.excludeKeyspaces and keyspace_name in self.config.excludeKeyspaces:
                 self.report.report_dropped(keyspace_name)
                 continue
+
+            # get all tables for this keyspace and emit their metadata
+            try:
+                yield from self._extract_tables_from_keyspace(keyspace_name)
+            except Exception as e:
+                logger.warning(f"Failed to extract table metadata for keyspace {keyspace_name}", exc_info=True)
+                self.report.report_warning(
+                    "keyspace", f"Exception while extracting keyspace tables {keyspace_name}: {e}"
+                )
             
-            tables = self.cassandra_session.execute("SELECT * FROM system_schema.tables WHERE "+CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["keyspace_name"]+" = %s", [keyspace_name])
-            # traverse tables in sorted order so output is consistent
-            tables = sorted(tables, key=lambda t: getattr(t, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["table_name"]))
-            for table in tables:
-                # define the dataset urn for this table to be used downstream
-                table_name = getattr(table, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["table_name"])
-                dataset_name = f"{keyspace_name}.{table_name}"
-                dataset_urn = make_dataset_urn_with_platform_instance(
-                    platform=platform_name,
-                    name=dataset_name,
-                    env=self.config.env,
-                    platform_instance=self.config.platform_instance,
+    # get all tables for a given keyspace, iterate over them to extract column metadata
+    def _extract_tables_from_keyspace(self, keyspace_name: str) -> Iterable[MetadataWorkUnit]:
+        tables = self.cassandra_session.execute(GET_TABLES_QUERY, [keyspace_name])
+        tables = sorted(tables, key=lambda t: getattr(t, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["table_name"])) # sorted so output is consistent
+        for table in tables:
+            # define the dataset urn for this table to be used downstream
+            table_name = getattr(table, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["table_name"])
+            dataset_name = f"{keyspace_name}.{table_name}"
+            dataset_urn = make_dataset_urn_with_platform_instance(
+                platform=PLATFORM_NAME_IN_DATAHUB,
+                name=dataset_name,
+                env=self.config.env,
+                platform_instance=self.config.platform_instance,
+            )
+
+            # 1. Extract columns from table, then construct and emit the schemaMetadata aspect.
+            try:
+                yield from self._extract_columns_from_table(keyspace_name, table_name, dataset_urn)
+            except Exception as e:
+                logger.warning(f"Failed to extract columns from table {table_name}", exc_info=True)
+                self.report.report_warning(
+                    "table", f"Exception while extracting table columns {table_name}: {e}"
                 )
 
-                # 1. Construct and emit the schemaMetadata aspect
-                # 1.1 get columns for table
-                column_infos = self.cassandra_session.execute("SELECT * FROM system_schema.columns WHERE "+ CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["keyspace_name"] +" = %s AND "+CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["table_name"]+" = %s", [keyspace_name, table_name])
-                column_infos = sorted(column_infos, key=lambda c: c.column_name)
-                schema_fields = list(
-                    CassandraToSchemaFieldConverter.get_schema_fields(column_infos)
-                )
-                if not schema_fields:
-                    return
-                
-                # 1.2 Generate the SchemaMetadata aspect
+            # 2. Construct and emit the status aspect.
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=StatusClass(removed=False),
+            ).as_workunit()
+            
 
-                # remove any value that is type bytes, so it can be converted to json
-                jsonable_columns = []
-                for column in column_infos:
-                    column_dict = column._asdict()
-                    jsonable_column_dict = column_dict.copy()
-                    # remove any value that is type bytes, so it can be converted to json
-                    for key, value in column_dict.items():
-                        if isinstance(value, bytes):
-                            jsonable_column_dict.pop(key)
-                    jsonable_columns.append(jsonable_column_dict)
+            # 3. TODO: If useful, we can construct and emit the datasetProperties aspect here.
+            # maybe emit details about the table like bloom_filter_fp_chance, caching, cdc, comment, compaction, compression,  ... max_index_interval ...
+            # custom_properties: Dict[str, str] = {}
 
-                logger.info(f"jsonable_columns: {json.dumps(jsonable_columns)}")
-                schema_metadata = SchemaMetadata(
-                    schemaName=table_name,
-                    platform=make_data_platform_urn(platform_name),
-                    version=0,
-                    hash="",
-                    platformSchema=OtherSchemaClass(rawSchema=json.dumps(jsonable_columns)),
-                    fields=schema_fields,
-                )
-
-                # 1.3 Emit the mcp
+            # 4. Construct and emit the platform instance aspect.
+            if self.config.platform_instance:
                 yield MetadataChangeProposalWrapper(
                     entityUrn=dataset_urn,
-                    aspect=schema_metadata,
-                ).as_workunit()
-
-
-                # 2. Construct and emit the status aspect.
-                yield MetadataChangeProposalWrapper(
-                    entityUrn=dataset_urn,
-                    aspect=StatusClass(removed=False),
-                ).as_workunit()
-                
-
-                # 3. TODO: Construct and emit the datasetProperties aspect.
-                # maybe emit details about the table like bloom_filter_fp_chance, caching, cdc, comment, compaction, compression,  ... max_index_interval ...
-                # custom_properties: Dict[str, str] = {}
-                
-                # 4. Construct and emit the platform instance aspect.
-                if self.config.platform_instance:
-                    yield MetadataChangeProposalWrapper(
-                        entityUrn=dataset_urn,
-                        aspect=DataPlatformInstanceClass(
-                            platform=make_data_platform_urn(platform_name),
-                            instance=make_dataplatform_instance_urn(
-                                platform_name, self.config.platform_instance
-                            ),
+                    aspect=DataPlatformInstanceClass(
+                        platform=make_data_platform_urn(PLATFORM_NAME_IN_DATAHUB),
+                        instance=make_dataplatform_instance_urn(
+                            PLATFORM_NAME_IN_DATAHUB, self.config.platform_instance
                         ),
-                    ).as_workunit()
-                # 5. TODO: maybe emit the datasetProfile aspect.
+                    ),
+                ).as_workunit()
+
+            # 5. NOTE: we don't emit the datasetProfile aspect because cassandra doesn't have a standard profiler we can tap into to cover most cases
+    
+    # get all columns for a given table, iterate over them to extract column metadata
+    def _extract_columns_from_table(self, keyspace_name: str, table_name: str, dataset_urn: str) -> Iterable[MetadataWorkUnit]:
+        # 1. Construct and emit the schemaMetadata aspect
+        # 1.1 get columns for table
+        column_infos = self.cassandra_session.execute(GET_COLUMNS_QUERY, [keyspace_name, table_name])
+        column_infos = sorted(column_infos, key=lambda c: c.column_name)
+        schema_fields = list(
+            CassandraToSchemaFieldConverter.get_schema_fields(column_infos)
+        )
+        if not schema_fields:
+            return
+        
+        # 1.2 Generate the SchemaMetadata aspect
+        # 1.2.1 remove any value that is type bytes, so it can be converted to json
+        jsonable_columns = []
+        for column in column_infos:
+            column_dict = column._asdict()
+            jsonable_column_dict = column_dict.copy()
+            for key, value in column_dict.items():
+                if isinstance(value, bytes):
+                    jsonable_column_dict.pop(key)
+            jsonable_columns.append(jsonable_column_dict)
+        # 1.2.2 generate the schemaMetadata aspect
+        schema_metadata = SchemaMetadata(
+            schemaName=table_name,
+            platform=make_data_platform_urn(PLATFORM_NAME_IN_DATAHUB),
+            version=0,
+            hash="",
+            platformSchema=OtherSchemaClass(rawSchema=json.dumps(jsonable_columns)),
+            fields=schema_fields,
+        )
+
+        # 1.3 Emit the mcp
+        yield MetadataChangeProposalWrapper(
+            entityUrn=dataset_urn,
+            aspect=schema_metadata,
+        ).as_workunit()
 
     def get_report(self):
         return self.report
@@ -261,14 +308,15 @@ class CassandraSource(Source):
 
 
 
+# -------------------------------------------------- utilities and supporting classes -------------------------------------------------- #
 
-
+# This class helps convert cassandra column types to SchemaFieldDataType for use by the datahaub metadata schema
 class CassandraToSchemaFieldConverter:
     # FieldPath format version.
     version_string: str = "[version=2.0]"
 
     # Mapping from cassandra field types to SchemaFieldDataType.
-    # https://cassandra.apache.org/doc/stable/cassandra/cql/types.html
+    # https://cassandra.apache.org/doc/stable/cassandra/cql/types.html (version 4.1)
     _field_type_to_schema_field_type: Dict[str, Type] = {
         # Bool
         "boolean": BooleanTypeClass,

@@ -2,16 +2,15 @@ source:
   type: "cassandra"
   config:
     # Coordinates
-    contact_point: "localhost"
+    contact_point: "cassandra-cosmos-staging.cassandra.cosmos.azure.com"
     port: 10350
 
     # Credentials
-    username: "admin"
-    password: "password"
+    username: "cassandra-cosmos-staging"
+    password: "HgVZkZrNb5l2VlH65B3R5wtpcBhvxddOR9bEVFewPrpvzyffaPf5fkFcFJ0fsn4wwVQ01n2ZNC19ACDblLxm1w=="
 
     # Options
-    excludeKeyspaces:
-      - system
+    excludeKeyspaces: []
 sink:
   type: "datahub-rest"
   config:
