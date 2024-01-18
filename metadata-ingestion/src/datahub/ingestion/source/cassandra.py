@@ -114,7 +114,7 @@ GET_TABLES_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SYSTE
 # get all columns for a table
 GET_COLUMNS_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SYSTEM_SCHEMA_TABLES['columns']} WHERE {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['keyspace_name']} = %s AND {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['table_name']} = %s"
 
-# -------------------------------------------------- setup the config and source reporter -------------------------------------------------- #
+# -------------------------------------------------- source config and reporter -------------------------------------------------- #
 
 # config
 class CassandraSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
@@ -145,7 +145,7 @@ class CassandraSourceReport(SourceReport):
 
 
 
-# -------------------------------------------------- the main source class -------------------------------------------------- #
+# -------------------------------------------------- main source class -------------------------------------------------- #
 @platform_name("Cassandra")
 @config_class(CassandraSourceConfig)
 @support_status(SupportStatus.TESTING)
@@ -270,6 +270,8 @@ class CassandraSource(Source):
             CassandraToSchemaFieldConverter.get_schema_fields(column_infos)
         )
         if not schema_fields:
+            logger.warn(f"Table {table_name} has no columns, skipping")
+            self.report.report_warning("table", f"Table {table_name} has no columns, skipping")
             return
         
         # 1.2 Generate the SchemaMetadata aspect
