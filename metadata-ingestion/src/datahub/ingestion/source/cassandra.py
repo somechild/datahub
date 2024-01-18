@@ -1,10 +1,10 @@
 import json
 import logging
 from dataclasses import dataclass, field
-from ssl import CERT_NONE, PROTOCOL_TLSv1_2, SSLContext
+from ssl import VerifyMode, CERT_NONE, PROTOCOL_TLSv1_2, SSLContext
 from typing import Any, Dict, Generator, Iterable, List, Optional, Type
 
-from cassandra.auth import PlainTextAuthProvider
+from cassandra.auth import PlainTextAuthProvider, AuthProvider
 from cassandra.cluster import Cluster, Session
 from pydantic.fields import Field
 
@@ -141,17 +141,17 @@ class CassandraSource(Source):
 
         # attempt to connect to cass
         ssl_context = SSLContext(PROTOCOL_TLSv1_2)
-        ssl_context.verify_mode = CERT_NONE
-        auth_provider = PlainTextAuthProvider(
+        ssl_context.verify_mode: VerifyMode = CERT_NONE
+        auth_provider: AuthProvider = PlainTextAuthProvider(
             username=config.username, password=config.password
         )
-        cluster = Cluster(
+        cluster: Cluster = Cluster(
             [config.contact_point],
             port=config.port,
             auth_provider=auth_provider,
             ssl_context=ssl_context,
         )
-        session = cluster.connect()
+        session: Session = cluster.connect()
         self.cassandra_session = session
 
     @classmethod
@@ -164,6 +164,7 @@ class CassandraSource(Source):
     ) -> Iterable[MetadataWorkUnit]:
 
         # get all keyspaces and iterate through them
+        # TODO: create a type for the response
         keyspaces = self.cassandra_session.execute(GET_KEYSPACES_QUERY)
         keyspaces = sorted(
             keyspaces,
@@ -173,7 +174,7 @@ class CassandraSource(Source):
         )
 
         for keyspace in keyspaces:
-            keyspace_name = getattr(
+            keyspace_name: str = getattr(
                 keyspace, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["keyspace_name"]
             )
 
@@ -211,10 +212,10 @@ class CassandraSource(Source):
         )  # sorted so output is consistent
         for table in tables:
             # define the dataset urn for this table to be used downstream
-            table_name = getattr(
+            table_name: str = getattr(
                 table, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["table_name"]
             )
-            dataset_name = f"{keyspace_name}.{table_name}"
+            dataset_name: str = f"{keyspace_name}.{table_name}"
             dataset_urn = make_dataset_urn_with_platform_instance(
                 platform=PLATFORM_NAME_IN_DATAHUB,
                 name=dataset_name,
@@ -266,11 +267,12 @@ class CassandraSource(Source):
     ) -> Iterable[MetadataWorkUnit]:
         # 1. Construct and emit the schemaMetadata aspect
         # 1.1 get columns for table
+        # TODO: create a type for the response
         column_infos = self.cassandra_session.execute(
             GET_COLUMNS_QUERY, [keyspace_name, table_name]
         )
         column_infos = sorted(column_infos, key=lambda c: c.column_name)
-        schema_fields = list(
+        schema_fields: list[SchemaField] = list(
             CassandraToSchemaFieldConverter.get_schema_fields(column_infos)
         )
         if not schema_fields:
@@ -282,7 +284,7 @@ class CassandraSource(Source):
 
         # 1.2 Generate the SchemaMetadata aspect
         # 1.2.1 remove any value that is type bytes, so it can be converted to json
-        jsonable_column_infos = []
+        jsonable_column_infos: list(dict[str, Any]) = []
         for column in column_infos:
             column_dict = column._asdict()
             jsonable_column_dict = column_dict.copy()
@@ -291,7 +293,7 @@ class CassandraSource(Source):
                     jsonable_column_dict.pop(key)
             jsonable_column_infos.append(jsonable_column_dict)
         # 1.2.2 generate the schemaMetadata aspect
-        schema_metadata = SchemaMetadata(
+        schema_metadata: SchemaMetadata = SchemaMetadata(
             schemaName=table_name,
             platform=make_data_platform_urn(PLATFORM_NAME_IN_DATAHUB),
             version=0,
@@ -402,8 +404,8 @@ class CassandraToSchemaFieldConverter:
             ]
             if cassandra_type is not None:
                 self._prefix_name_stack.append(f"[type={cassandra_type}].{column_name}")
-                schema_field_data_type = self.get_column_type(cassandra_type)
-                schema_field = SchemaField(
+                schema_field_data_type: SchemaFieldDataType = self.get_column_type(cassandra_type)
+                schema_field: SchemaField = SchemaField(
                     fieldPath=self._get_cur_field_path(),
                     nativeDataType=cassandra_type,
                     type=schema_field_data_type,
