@@ -105,6 +105,7 @@ class CassandraSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
         description="regex patterns for tables to filter in ingestion.",
     )
 
+
 # source reporter
 @dataclass
 class CassandraSourceReport(SourceReport):
@@ -281,21 +282,21 @@ class CassandraSource(Source):
 
         # 1.2 Generate the SchemaMetadata aspect
         # 1.2.1 remove any value that is type bytes, so it can be converted to json
-        jsonable_columns = []
+        jsonable_column_infos = []
         for column in column_infos:
             column_dict = column._asdict()
             jsonable_column_dict = column_dict.copy()
             for key, value in column_dict.items():
                 if isinstance(value, bytes):
                     jsonable_column_dict.pop(key)
-            jsonable_columns.append(jsonable_column_dict)
+            jsonable_column_infos.append(jsonable_column_dict)
         # 1.2.2 generate the schemaMetadata aspect
         schema_metadata = SchemaMetadata(
             schemaName=table_name,
             platform=make_data_platform_urn(PLATFORM_NAME_IN_DATAHUB),
             version=0,
             hash="",
-            platformSchema=OtherSchemaClass(rawSchema=json.dumps(jsonable_columns)),
+            platformSchema=OtherSchemaClass(rawSchema=json.dumps(jsonable_column_infos)),
             fields=schema_fields,
         )
 
@@ -379,18 +380,22 @@ class CassandraToSchemaFieldConverter:
         return ".".join(self._prefix_name_stack)
 
     def _get_schema_fields(
-        self, cassandra_column_schemas: List[dict[str, Any]]
+        self, cassandra_column_infos: List[dict[str, Any]]
     ) -> Generator[SchemaField, None, None]:
         # append each schema field (sort so output is consistent)
-        for columnSchema in cassandra_column_schemas:
-            columnName: str = getattr(
-                columnSchema, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_name"]
+        for column_info in cassandra_column_infos:
+            # convert namedtuple to dictionary if it isn't already one
+            column_info = (
+                column_info._asdict()
+                if hasattr(column_info, "_asdict")
+                else column_info
             )
-            cassandra_type: str = getattr(
-                columnSchema, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_type"]
-            )
+            column_info['column_name_bytes'] = None
+            logger.info(f"Processing column schema: {json.dumps(column_info)}")
+            column_name: str = column_info[CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_name"]]
+            cassandra_type: str = column_info[CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_type"]]
             if cassandra_type is not None:
-                self._prefix_name_stack.append(f"[type={cassandra_type}].{columnName}")
+                self._prefix_name_stack.append(f"[type={cassandra_type}].{column_name}")
                 schema_field_data_type = self.get_column_type(cassandra_type)
                 schema_field = SchemaField(
                     fieldPath=self._get_cur_field_path(),
@@ -406,13 +411,13 @@ class CassandraToSchemaFieldConverter:
                 # Unexpected! Log a warning.
                 logger.warning(
                     f"Cassandra schema does not have 'type'!"
-                    f" Schema={json.dumps(columnSchema)}"
+                    f" Schema={json.dumps(column_info)}"
                 )
                 continue
 
     @classmethod
     def get_schema_fields(
-        cls, cassandra_column_schemas: List[dict[str, Any]]
+        cls, cassandra_column_infos: List[dict[str, Any]]
     ) -> Generator[SchemaField, None, None]:
         converter = cls()
-        yield from converter._get_schema_fields(cassandra_column_schemas)
+        yield from converter._get_schema_fields(cassandra_column_infos)
