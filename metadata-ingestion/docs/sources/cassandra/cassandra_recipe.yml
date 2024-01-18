@@ -10,6 +10,7 @@ source:
     password: "password"
 
     # Options
-    keyspace_pattern: []
+    keyspace_pattern:
+      allow: [".*"]
 sink:
   # config sinks
