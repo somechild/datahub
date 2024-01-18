@@ -296,7 +296,9 @@ class CassandraSource(Source):
             platform=make_data_platform_urn(PLATFORM_NAME_IN_DATAHUB),
             version=0,
             hash="",
-            platformSchema=OtherSchemaClass(rawSchema=json.dumps(jsonable_column_infos)),
+            platformSchema=OtherSchemaClass(
+                rawSchema=json.dumps(jsonable_column_infos)
+            ),
             fields=schema_fields,
         )
 
@@ -390,10 +392,14 @@ class CassandraToSchemaFieldConverter:
                 if hasattr(column_info, "_asdict")
                 else column_info
             )
-            column_info['column_name_bytes'] = None
+            column_info["column_name_bytes"] = None
             logger.info(f"Processing column schema: {json.dumps(column_info)}")
-            column_name: str = column_info[CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_name"]]
-            cassandra_type: str = column_info[CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_type"]]
+            column_name: str = column_info[
+                CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_name"]
+            ]
+            cassandra_type: str = column_info[
+                CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_type"]
+            ]
             if cassandra_type is not None:
                 self._prefix_name_stack.append(f"[type={cassandra_type}].{column_name}")
                 schema_field_data_type = self.get_column_type(cassandra_type)

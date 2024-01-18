@@ -5,11 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from datahub.configuration.common import ConfigurationError
-from datahub.ingestion.source.cassandra import (
-    CassandraSourceConfig,
-    CassandraToSchemaFieldConverter,
-)
+from datahub.ingestion.source.cassandra import CassandraToSchemaFieldConverter
 from datahub.metadata.com.linkedin.pegasus2avro.schema import SchemaField
 
 logger = logging.getLogger(__name__)
@@ -61,11 +57,12 @@ def test_elastic_search_schema_conversion(
 ) -> None:
     schema_dict: Dict[str, List[Any]] = json.loads(schema)
     column_infos: List[dict[str, Any]] = schema_dict["column_infos"]
-    actual_fields = list(CassandraToSchemaFieldConverter.get_schema_fields(column_infos))
+    actual_fields = list(
+        CassandraToSchemaFieldConverter.get_schema_fields(column_infos)
+    )
     assert_field_paths_match(actual_fields, expected_field_paths)
 
 
 def test_no_properties_in_mappings_schema() -> None:
     fields = list(CassandraToSchemaFieldConverter.get_schema_fields([]))
     assert fields == []
-
