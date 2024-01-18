@@ -2,12 +2,13 @@ import json
 import logging
 from dataclasses import dataclass, field
 from ssl import CERT_NONE, PROTOCOL_TLSv1_2, SSLContext
-from typing import Dict, Generator, Iterable, List, Optional, Type, Any
+from typing import Any, Dict, Generator, Iterable, List, Optional, Type
 
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster, Session
 from pydantic.fields import Field
 
+from datahub.configuration.common import AllowDenyPattern
 from datahub.configuration.source_common import (
     EnvConfigMixin,
     PlatformInstanceConfigMixin,
@@ -99,10 +100,10 @@ class CassandraSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
     port: str = Field(default="10350", description="The cassandra instance port.")
     username: str = Field(default="", description="The username credential.")
     password: str = Field(default="", description="The password credential.")
-    excludeKeyspaces: List[str] = Field(
-        default=[], description="The keyspaces to exclude."
+    keyspace_pattern: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="regex patterns for tables to filter in ingestion.",
     )
-
 
 # source reporter
 @dataclass
@@ -178,11 +179,8 @@ class CassandraSource(Source):
             # skip system keyspaces
             if keyspace_name in SYSTEM_KEYSPACE_LIST:
                 continue
-            # skip keyspaces excluded by the config
-            if (
-                self.config.excludeKeyspaces
-                and keyspace_name in self.config.excludeKeyspaces
-            ):
+            # skip keyspaces not allowed by the config
+            if not self.config.keyspace_pattern.allowed(keyspace_name):
                 self.report.report_dropped(keyspace_name)
                 continue
 

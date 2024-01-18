@@ -81,7 +81,7 @@
         "name": "cassandra",
         "displayName": "CassandraDB",
         "docsUrl": "https://datahubproject.io/docs/generated/ingestion/sources/cassandra'",
-        "recipe": "source:\n    type: cassandra\n   config:\n       # Coordinates\n     contact_point: 'localhost'\n        port: 10350\n       # Credentials\n     username: null\n        password: null\n        excludeKeyspaces: [] # Note, system keyspaces will already be excluded by default\n"
+        "recipe": "source:\n    type: cassandra\n   config:\n       # Coordinates\n     contact_point: 'localhost'\n        port: 10350\n       # Credentials\n     username: null\n        password: null\n        # Optional Allow / Deny extraction of particular keyspaces.\n       # keyspace_pattern:\n           # allow:\n              # - \".*\""
     },
     {
         "urn": "urn:li:dataPlatform:hive",

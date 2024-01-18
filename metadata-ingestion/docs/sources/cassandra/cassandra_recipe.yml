@@ -10,8 +10,6 @@ source:
     password: "password"
 
     # Options
-    excludeKeyspaces: []
+    keyspace_pattern: []
 sink:
-  type: "datahub-rest"
-  config:
-    server: "http://localhost:8080"
+  # config sinks
