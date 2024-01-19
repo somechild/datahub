@@ -83,6 +83,9 @@ PlatformKey = ContainerKey
 class DatabaseKey(ContainerKey):
     database: str
 
+class KeyspaceKey(ContainerKey):
+    keyspace: str
+
 
 class SchemaKey(DatabaseKey):
     db_schema: str = Field(alias="schema")

@@ -18,6 +18,12 @@ from datahub.emitter.mce_builder import (
     make_dataplatform_instance_urn,
     make_dataset_urn_with_platform_instance,
 )
+from datahub.emitter.mcp_builder import (
+    add_dataset_to_container,
+    gen_containers,
+    KeyspaceKey,
+    ContainerKey,
+)
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.common import PipelineContext
 from datahub.ingestion.api.decorators import (
@@ -41,13 +47,21 @@ from datahub.metadata.schema_classes import (
     BooleanTypeClass,
     BytesTypeClass,
     DataPlatformInstanceClass,
+    DatasetLineageTypeClass,
     DateTypeClass,
     NullTypeClass,
     NumberTypeClass,
     OtherSchemaClass,
     RecordTypeClass,
     StringTypeClass,
+    SubTypesClass,
     TimeTypeClass,
+    UpstreamClass,
+    UpstreamLineageClass,
+)
+from datahub.ingestion.source.common.subtypes import (
+    DatasetSubTypes,
+    DatasetContainerSubTypes
 )
 
 logger = logging.getLogger(__name__)
@@ -58,25 +72,30 @@ logger = logging.getLogger(__name__)
 PLATFORM_NAME_IN_DATAHUB = "cassandra"
 
 # we always skip over ingesting metadata about these keyspaces
-# TODO: make this configurable?
 SYSTEM_KEYSPACE_LIST = set(
     ["system", "system_auth", "system_schema", "system_distributed", "system_traces"]
 )
 
+# - Referencing https://docs.datastax.com/en/cql-oss/3.x/cql/cql_using/useQuerySystem.html#Table3.ColumnsinSystem_SchemaTables-Cassandra3.0 - #
 # this keyspace contains details about the cassandra cluster's keyspaces, tables, and columns
 SYSTEM_SCHEMA_KESPACE_NAME = "system_schema"
 # these are the names of the tables we're interested in querying metadata from
 CASSANDRA_SYSTEM_SCHEMA_TABLES = {
     "keyspaces": "keyspaces",
     "tables": "tables",
+    "views": "views",
     "columns": "columns",
 }
 # these column names are present on the system_schema tables
 CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES = {
-    "keyspace_name": "keyspace_name",
-    "table_name": "table_name",
-    "column_name": "column_name",
-    "column_type": "type",
+    "keyspace_name": "keyspace_name", # present on all tables
+    "table_name": "table_name", # present on tables table
+    "column_name": "column_name", # present on columns table
+    "column_type": "type", # present on columns table
+
+    "view_name": "view_name", # present on views table
+    "base_table_name": "base_table_name", # present on views table
+    "where_clause": "where_clause", # present on views table
 }
 
 
@@ -87,6 +106,8 @@ GET_KEYSPACES_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SY
 GET_TABLES_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SYSTEM_SCHEMA_TABLES['tables']} WHERE {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['keyspace_name']} = %s"
 # get all columns for a table
 GET_COLUMNS_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SYSTEM_SCHEMA_TABLES['columns']} WHERE {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['keyspace_name']} = %s AND {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['table_name']} = %s"
+# get all views for a keyspace
+GET_VIEWS_QUERY = f"SELECT * FROM {SYSTEM_SCHEMA_KESPACE_NAME}.{CASSANDRA_SYSTEM_SCHEMA_TABLES['views']} WHERE {CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['keyspace_name']} = %s"
 
 
 # -------------------------------------------------- source config and reporter -------------------------------------------------- #
@@ -98,7 +119,7 @@ class CassandraSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
         description="The cassandra instance contact point domain (without the port).",
     )
     port: str = Field(default="10350", description="The cassandra instance port.")
-    username: str = Field(default="", description="The username credential.")
+    username: str = Field(default="", description=f"The username credential. Ensure user has read access to {SYSTEM_SCHEMA_KESPACE_NAME}.")
     password: str = Field(default="", description="The password credential.")
     keyspace_pattern: AllowDenyPattern = Field(
         default=AllowDenyPattern.allow_all(),
@@ -133,9 +154,11 @@ class CassandraSource(Source):
     config: CassandraSourceConfig
     report: CassandraSourceReport
     cassandra_session: Session
+    platform: str
 
     def __init__(self, ctx: PipelineContext, config: CassandraSourceConfig):
         self.ctx = ctx
+        self.platform = PLATFORM_NAME_IN_DATAHUB
         self.config = config
         self.report = CassandraSourceReport()
 
@@ -186,7 +209,10 @@ class CassandraSource(Source):
                 self.report.report_dropped(keyspace_name)
                 continue
 
-            # get all tables for this keyspace and emit their metadata
+            # 1. Construct and emit the container aspect.
+            yield from self._generate_keyspace_container(keyspace_name)
+
+            # 2. get all tables for this keyspace and emit their metadata (dataset, container and schema info)
             try:
                 yield from self._extract_tables_from_keyspace(keyspace_name)
             except Exception as e:
@@ -198,6 +224,33 @@ class CassandraSource(Source):
                     "keyspace",
                     f"Exception while extracting keyspace tables {keyspace_name}: {e}",
                 )
+
+            # 3. get all views for this keyspace and emit their metadata (dataset, container and lineage info)
+            try:
+                yield from self._extract_views_from_keyspace(keyspace_name)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to extract view metadata for keyspace {keyspace_name}",
+                    exc_info=True,
+                )
+                self.report.report_warning(
+                    "keyspace",
+                    f"Exception while extracting keyspace views {keyspace_name}: {e}",
+                )
+    def _generate_keyspace_container(self, keyspace_name: str) -> Iterable[MetadataWorkUnit]:
+        keyspace_container_key = self._generate_keyspace_container_key(keyspace_name)
+        yield from gen_containers(
+            container_key=keyspace_container_key,
+            name=keyspace_name,
+            sub_types=[DatasetContainerSubTypes.KEYSPACE],
+        )
+    def _generate_keyspace_container_key(self, keyspace_name: str) -> ContainerKey:
+        return KeyspaceKey(
+            keyspace=keyspace_name,
+            platform=self.platform,
+            platform_instance=self.config.platform_instance,
+            env=self.config.env,
+        )
 
     # get all tables for a given keyspace, iterate over them to extract column metadata
     def _extract_tables_from_keyspace(
@@ -217,7 +270,7 @@ class CassandraSource(Source):
             )
             dataset_name: str = f"{keyspace_name}.{table_name}"
             dataset_urn = make_dataset_urn_with_platform_instance(
-                platform=PLATFORM_NAME_IN_DATAHUB,
+                platform=self.platform,
                 name=dataset_name,
                 env=self.config.env,
                 platform_instance=self.config.platform_instance,
@@ -243,23 +296,39 @@ class CassandraSource(Source):
                 aspect=StatusClass(removed=False),
             ).as_workunit()
 
-            # 3. TODO: If useful, we can construct and emit the datasetProperties aspect here.
+            # 3. Construct and emit subtype
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=SubTypesClass(
+                    typeNames=[
+                        DatasetSubTypes.TABLE,
+                    ]
+                ),
+            ).as_workunit()
+
+            # 4. TODO: If useful, we can construct and emit the datasetProperties aspect here.
             # maybe emit details about the table like bloom_filter_fp_chance, caching, cdc, comment, compaction, compression,  ... max_index_interval ...
             # custom_properties: Dict[str, str] = {}
 
-            # 4. Construct and emit the platform instance aspect.
+            # 5. Connect the table to the parent keyspace container
+            yield from add_dataset_to_container(
+                container_key=self._generate_keyspace_container_key(keyspace_name),
+                dataset_urn=dataset_urn,
+            )
+
+            # 6. Construct and emit the platform instance aspect.
             if self.config.platform_instance:
                 yield MetadataChangeProposalWrapper(
                     entityUrn=dataset_urn,
                     aspect=DataPlatformInstanceClass(
-                        platform=make_data_platform_urn(PLATFORM_NAME_IN_DATAHUB),
+                        platform=make_data_platform_urn(self.platform),
                         instance=make_dataplatform_instance_urn(
-                            PLATFORM_NAME_IN_DATAHUB, self.config.platform_instance
+                            self.platform, self.config.platform_instance
                         ),
                     ),
                 ).as_workunit()
 
-            # 5. NOTE: we don't emit the datasetProfile aspect because cassandra doesn't have a standard profiler we can tap into to cover most cases
+            # 6. NOTE: we don't emit the datasetProfile aspect because cassandra doesn't have a standard profiler we can tap into to cover most cases
 
     # get all columns for a given table, iterate over them to extract column metadata
     def _extract_columns_from_table(
@@ -295,7 +364,7 @@ class CassandraSource(Source):
         # 1.2.2 generate the schemaMetadata aspect
         schema_metadata: SchemaMetadata = SchemaMetadata(
             schemaName=table_name,
-            platform=make_data_platform_urn(PLATFORM_NAME_IN_DATAHUB),
+            platform=make_data_platform_urn(self.platform),
             version=0,
             hash="",
             platformSchema=OtherSchemaClass(
@@ -309,6 +378,84 @@ class CassandraSource(Source):
             entityUrn=dataset_urn,
             aspect=schema_metadata,
         ).as_workunit()
+    
+    # NOTE: this will only emit dataset and lineage info as we can't get columns for views from the sys schema metadata
+    def _extract_views_from_keyspace(
+        self, keyspace_name: str
+    ) -> Iterable[MetadataWorkUnit]:
+        views = self.cassandra_session.execute(GET_VIEWS_QUERY, [keyspace_name])
+        views = sorted(
+            views,
+            key=lambda v: getattr(
+                v, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["view_name"]
+            ),
+        )
+        for view in views:
+            # define the dataset urn for this view to be used downstream
+            view_name: str = getattr(
+                view, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["view_name"]
+            )
+            dataset_name: str = f"{keyspace_name}.{view_name}"
+            dataset_urn: str = make_dataset_urn_with_platform_instance(
+                platform=self.platform,
+                name=dataset_name,
+                env=self.config.env,
+                platform_instance=self.config.platform_instance,
+            )
+
+            
+            # 1. Construct and emit the status aspect.
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=StatusClass(removed=False),
+            ).as_workunit()
+
+            # 2. Construct and emit subtype
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=SubTypesClass(
+                    typeNames=[
+                        DatasetSubTypes.VIEW,
+                    ]
+                ),
+            ).as_workunit()
+
+            # 3. Construct and emit lineage off of 'base_table_name'
+            # NOTE: we don't need to use 'base_table_id' since table is always in same keyspace, see https://docs.datastax.com/en/cql-oss/3.3/cql/cql_reference/cqlCreateMaterializedView.html#cqlCreateMaterializedView__keyspace-name
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=UpstreamLineageClass(
+                    upstreams=[
+                        UpstreamClass(
+                            dataset=make_dataset_urn_with_platform_instance(
+                                platform=self.platform,
+                                name=f"{keyspace_name}.{getattr(view, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES['base_table_name'])}",
+                                env=self.config.env,
+                                platform_instance=self.config.platform_instance,
+                            ),
+                            type=DatasetLineageTypeClass.VIEW,
+                        )
+                    ]
+                ),
+            ).as_workunit()
+
+            # 4. Connect the view to the parent keyspace container
+            yield from add_dataset_to_container(
+                container_key=self._generate_keyspace_container_key(keyspace_name),
+                dataset_urn=dataset_urn,
+            )
+
+            # 5. Construct and emit the platform instance aspect.
+            if self.config.platform_instance:
+                yield MetadataChangeProposalWrapper(
+                    entityUrn=dataset_urn,
+                    aspect=DataPlatformInstanceClass(
+                        platform=make_data_platform_urn(self.platform),
+                        instance=make_dataplatform_instance_urn(
+                            self.platform, self.config.platform_instance
+                        ),
+                    ),
+                ).as_workunit()
 
     def get_report(self):
         return self.report
@@ -324,7 +471,7 @@ class CassandraSource(Source):
 # This class helps convert cassandra column types to SchemaFieldDataType for use by the datahaub metadata schema
 class CassandraToSchemaFieldConverter:
     # FieldPath format version.
-    version_string: str = "[version=2.0]"
+    version_string: str = "[version=1.0]"
 
     # Mapping from cassandra field types to SchemaFieldDataType.
     # https://cassandra.apache.org/doc/stable/cassandra/cql/types.html (version 4.1)
