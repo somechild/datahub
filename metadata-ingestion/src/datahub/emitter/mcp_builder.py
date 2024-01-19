@@ -83,6 +83,7 @@ PlatformKey = ContainerKey
 class DatabaseKey(ContainerKey):
     database: str
 
+
 class KeyspaceKey(ContainerKey):
     keyspace: str
 

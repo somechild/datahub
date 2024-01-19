@@ -1,10 +1,10 @@
 import json
 import logging
 from dataclasses import dataclass, field
-from ssl import VerifyMode, CERT_NONE, PROTOCOL_TLSv1_2, SSLContext
+from ssl import CERT_NONE, PROTOCOL_TLSv1_2, SSLContext
 from typing import Any, Dict, Generator, Iterable, List, Optional, Type
 
-from cassandra.auth import PlainTextAuthProvider, AuthProvider
+from cassandra.auth import AuthProvider, PlainTextAuthProvider
 from cassandra.cluster import Cluster, Session
 from pydantic.fields import Field
 
@@ -18,13 +18,13 @@ from datahub.emitter.mce_builder import (
     make_dataplatform_instance_urn,
     make_dataset_urn_with_platform_instance,
 )
+from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.emitter.mcp_builder import (
+    ContainerKey,
+    KeyspaceKey,
     add_dataset_to_container,
     gen_containers,
-    KeyspaceKey,
-    ContainerKey,
 )
-from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.common import PipelineContext
 from datahub.ingestion.api.decorators import (
     SourceCapability,
@@ -36,6 +36,10 @@ from datahub.ingestion.api.decorators import (
 )
 from datahub.ingestion.api.source import Source, SourceReport
 from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.source.common.subtypes import (
+    DatasetContainerSubTypes,
+    DatasetSubTypes,
+)
 from datahub.metadata.com.linkedin.pegasus2avro.common import StatusClass
 from datahub.metadata.com.linkedin.pegasus2avro.schema import (
     SchemaField,
@@ -58,10 +62,6 @@ from datahub.metadata.schema_classes import (
     TimeTypeClass,
     UpstreamClass,
     UpstreamLineageClass,
-)
-from datahub.ingestion.source.common.subtypes import (
-    DatasetSubTypes,
-    DatasetContainerSubTypes
 )
 
 logger = logging.getLogger(__name__)
@@ -88,14 +88,13 @@ CASSANDRA_SYSTEM_SCHEMA_TABLES = {
 }
 # these column names are present on the system_schema tables
 CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES = {
-    "keyspace_name": "keyspace_name", # present on all tables
-    "table_name": "table_name", # present on tables table
-    "column_name": "column_name", # present on columns table
-    "column_type": "type", # present on columns table
-
-    "view_name": "view_name", # present on views table
-    "base_table_name": "base_table_name", # present on views table
-    "where_clause": "where_clause", # present on views table
+    "keyspace_name": "keyspace_name",  # present on all tables
+    "table_name": "table_name",  # present on tables table
+    "column_name": "column_name",  # present on columns table
+    "column_type": "type",  # present on columns table
+    "view_name": "view_name",  # present on views table
+    "base_table_name": "base_table_name",  # present on views table
+    "where_clause": "where_clause",  # present on views table
 }
 
 
@@ -119,7 +118,10 @@ class CassandraSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
         description="The cassandra instance contact point domain (without the port).",
     )
     port: str = Field(default="10350", description="The cassandra instance port.")
-    username: str = Field(default="", description=f"The username credential. Ensure user has read access to {SYSTEM_SCHEMA_KESPACE_NAME}.")
+    username: str = Field(
+        default="",
+        description=f"The username credential. Ensure user has read access to {SYSTEM_SCHEMA_KESPACE_NAME}.",
+    )
     password: str = Field(default="", description="The password credential.")
     keyspace_pattern: AllowDenyPattern = Field(
         default=AllowDenyPattern.allow_all(),
@@ -165,25 +167,26 @@ class CassandraSource(Source):
         # attempt to connect to cass
         if config.username and config.password:
             ssl_context = SSLContext(PROTOCOL_TLSv1_2)
-            ssl_context.verify_mode: VerifyMode = CERT_NONE
+            ssl_context.verify_mode = CERT_NONE
             auth_provider: AuthProvider = PlainTextAuthProvider(
                 username=config.username, password=config.password
             )
-            cluster: Cluster = Cluster(
+
+        cluster: Cluster = (
+            Cluster(
                 [config.contact_point],
                 port=config.port,
                 auth_provider=auth_provider,
                 ssl_context=ssl_context,
             )
-            session: Session = cluster.connect()
-            self.cassandra_session = session
-        else:
-            cluster: Cluster = Cluster(
+            if auth_provider
+            else Cluster(
                 [config.contact_point],
                 port=config.port,
             )
-            session: Session = cluster.connect()
-            self.cassandra_session = session
+        )
+        session: Session = cluster.connect()
+        self.cassandra_session = session
 
     @classmethod
     def create(cls, config_dict, ctx):
@@ -245,13 +248,17 @@ class CassandraSource(Source):
                     "keyspace",
                     f"Exception while extracting keyspace views {keyspace_name}: {e}",
                 )
-    def _generate_keyspace_container(self, keyspace_name: str) -> Iterable[MetadataWorkUnit]:
+
+    def _generate_keyspace_container(
+        self, keyspace_name: str
+    ) -> Iterable[MetadataWorkUnit]:
         keyspace_container_key = self._generate_keyspace_container_key(keyspace_name)
         yield from gen_containers(
             container_key=keyspace_container_key,
             name=keyspace_name,
             sub_types=[DatasetContainerSubTypes.KEYSPACE],
         )
+
     def _generate_keyspace_container_key(self, keyspace_name: str) -> ContainerKey:
         return KeyspaceKey(
             keyspace=keyspace_name,
@@ -361,7 +368,7 @@ class CassandraSource(Source):
 
         # 1.2 Generate the SchemaMetadata aspect
         # 1.2.1 remove any value that is type bytes, so it can be converted to json
-        jsonable_column_infos: list(dict[str, Any]) = []
+        jsonable_column_infos: list[dict[str, Any]] = []
         for column in column_infos:
             column_dict = column._asdict()
             jsonable_column_dict = column_dict.copy()
@@ -386,7 +393,7 @@ class CassandraSource(Source):
             entityUrn=dataset_urn,
             aspect=schema_metadata,
         ).as_workunit()
-    
+
     # NOTE: this will only emit dataset and lineage info as we can't get columns for views from the sys schema metadata
     def _extract_views_from_keyspace(
         self, keyspace_name: str
@@ -394,9 +401,7 @@ class CassandraSource(Source):
         views = self.cassandra_session.execute(GET_VIEWS_QUERY, [keyspace_name])
         views = sorted(
             views,
-            key=lambda v: getattr(
-                v, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["view_name"]
-            ),
+            key=lambda v: getattr(v, CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["view_name"]),
         )
         for view in views:
             # define the dataset urn for this view to be used downstream
@@ -411,7 +416,6 @@ class CassandraSource(Source):
                 platform_instance=self.config.platform_instance,
             )
 
-            
             # 1. Construct and emit the status aspect.
             yield MetadataChangeProposalWrapper(
                 entityUrn=dataset_urn,
@@ -559,7 +563,9 @@ class CassandraToSchemaFieldConverter:
             ]
             if cassandra_type is not None:
                 self._prefix_name_stack.append(f"[type={cassandra_type}].{column_name}")
-                schema_field_data_type: SchemaFieldDataType = self.get_column_type(cassandra_type)
+                schema_field_data_type: SchemaFieldDataType = self.get_column_type(
+                    cassandra_type
+                )
                 schema_field: SchemaField = SchemaField(
                     fieldPath=self._get_cur_field_path(),
                     nativeDataType=cassandra_type,
