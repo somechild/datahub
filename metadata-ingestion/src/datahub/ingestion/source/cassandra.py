@@ -165,10 +165,11 @@ class CassandraSource(Source):
         self.report = CassandraSourceReport()
 
         # attempt to connect to cass
+        auth_provider: AuthProvider = None
         if config.username and config.password:
             ssl_context = SSLContext(PROTOCOL_TLSv1_2)
             ssl_context.verify_mode = CERT_NONE
-            auth_provider: AuthProvider = PlainTextAuthProvider(
+            auth_provider = PlainTextAuthProvider(
                 username=config.username, password=config.password
             )
 
@@ -483,7 +484,7 @@ class CassandraSource(Source):
 # This class helps convert cassandra column types to SchemaFieldDataType for use by the datahaub metadata schema
 class CassandraToSchemaFieldConverter:
     # FieldPath format version.
-    version_string: str = "[version=1.0]"
+    version_string: str = "[version=2.0]"
 
     # Mapping from cassandra field types to SchemaFieldDataType.
     # https://cassandra.apache.org/doc/stable/cassandra/cql/types.html (version 4.1)
@@ -554,7 +555,6 @@ class CassandraToSchemaFieldConverter:
                 else column_info
             )
             column_info["column_name_bytes"] = None
-            logger.info(f"Processing column schema: {json.dumps(column_info)}")
             column_name: str = column_info[
                 CASSANDRA_SYSTEM_SCHEMA_COLUMN_NAMES["column_name"]
             ]
