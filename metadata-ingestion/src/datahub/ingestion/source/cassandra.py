@@ -163,19 +163,27 @@ class CassandraSource(Source):
         self.report = CassandraSourceReport()
 
         # attempt to connect to cass
-        ssl_context = SSLContext(PROTOCOL_TLSv1_2)
-        ssl_context.verify_mode: VerifyMode = CERT_NONE
-        auth_provider: AuthProvider = PlainTextAuthProvider(
-            username=config.username, password=config.password
-        )
-        cluster: Cluster = Cluster(
-            [config.contact_point],
-            port=config.port,
-            auth_provider=auth_provider,
-            ssl_context=ssl_context,
-        )
-        session: Session = cluster.connect()
-        self.cassandra_session = session
+        if config.username and config.password:
+            ssl_context = SSLContext(PROTOCOL_TLSv1_2)
+            ssl_context.verify_mode: VerifyMode = CERT_NONE
+            auth_provider: AuthProvider = PlainTextAuthProvider(
+                username=config.username, password=config.password
+            )
+            cluster: Cluster = Cluster(
+                [config.contact_point],
+                port=config.port,
+                auth_provider=auth_provider,
+                ssl_context=ssl_context,
+            )
+            session: Session = cluster.connect()
+            self.cassandra_session = session
+        else:
+            cluster: Cluster = Cluster(
+                [config.contact_point],
+                port=config.port,
+            )
+            session: Session = cluster.connect()
+            self.cassandra_session = session
 
     @classmethod
     def create(cls, config_dict, ctx):

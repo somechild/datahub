@@ -1,0 +1,13 @@
+version: "1"
+services:
+  testcassandra:
+    image: cassandra
+    container_name: "testcassandra"
+    # environment:
+    #   No env vars needed. AllowAll authenticator is used by default (https://docs.datastax.com/en/archived/cassandra/3.0/cassandra/configuration/configCassandra_yaml.html?scroll=configCassandra_yaml__endpoint_snitch)
+    ports:
+      - 10350:10350
+    entrypoint: /docker-entrypoint-initdb.d/custom_entrypoint.sh
+    volumes:
+      - ./setup/custom_entrypoint.sh:/docker-entrypoint-initdb.d/custom_entrypoint.sh
+      - ./setup/init_keyspaces.cql:/etc/docker-entrypoint-initdb.d/init_keyspaces.cql
