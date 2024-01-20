@@ -189,7 +189,7 @@ snowflake_common = {
     "pandas",
     "cryptography",
     "msal",
-    "acryl-datahub-classify==0.0.8",
+    "acryl-datahub-classify==0.0.9",
     # spacy version restricted to reduce backtracking, used by acryl-datahub-classify,
     "spacy==3.4.3",
 }
@@ -315,7 +315,7 @@ plugins: Dict[str, Set[str]] = {
         "cassandra-driver~=3.28.0"
     },
     "feast": {
-        "feast~=0.34.1",
+        "feast~=0.35.0",
         "flask-openid>=1.3.0",
         # typeguard 3.x, released on 2023-03-14, seems to cause issues with Feast.
         "typeguard<3",
