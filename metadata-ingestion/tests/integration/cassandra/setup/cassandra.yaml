@@ -1,7 +1,11 @@
-# NOTE: we've copied the yaml from the official Cassandra Docker image (https://github.com/datastax/docker-images/blob/master/config-templates/DSE/6.0.0/cassandra.yaml)
-#       ensured we keep the AllowAllNetworkAuthorizer, and
-#       enabled the materialized view feature.
-
+# ---------------------------------------------------------------------------------------- #
+# NOTE:
+# This yaml has been copied from the official Cassandra Docker image:
+# (https://github.com/datastax/docker-images/blob/master/config-templates/DSE/6.0.0/cassandra.yaml)
+# 
+# Key interests are in setting the AllowAllNetworkAuthorizer,
+# and in enabling materialized view feature.
+# ---------------------------------------------------------------------------------------- #
 
 # Cassandra storage config YAML
 
